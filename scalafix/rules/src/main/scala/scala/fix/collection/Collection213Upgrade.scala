@@ -12,70 +12,68 @@
 
 package scala.fix.collection
 
-import scalafix.v0._
 import scala.meta._
 
-import scalafix.internal.v0.LegacySemanticRule
+import scalafix.v1._
 
-class Collection213Upgrade
-    extends LegacySemanticRule("Collection213Upgrade", index => new Collection213UpgradeV0(index))
-    with Stable212BaseCheck {
-  override def description: String =
-    "Upgrade to 2.13’s collections (for applications)"
-}
-
-// Not 2.12 Cross-Compatible
-case class Collection213UpgradeV0(index: SemanticdbIndex)
-    extends SemanticRule(index, "Upgrade213")
-    with Stable212Base {
-
-  def isCrossCompatible: Boolean = false
+class Collection213Upgrade extends SemanticRule("Collection213Upgrade") {
 
   //  == Symbols ==
 
-  val tupleZipped = normalized(
+  val tupleZipped = SymbolMatcher.normalized(
     "scala/runtime/Tuple2Zipped.Ops#zipped().",
     "scala/runtime/Tuple3Zipped.Ops#zipped()."
   )
-  val retainMap = normalized(
+  val retainMap = SymbolMatcher.normalized(
     "scala/collection/mutable/MapLike#retain()."
   )
-  val retainSet = normalized(
+  val retainSet = SymbolMatcher.normalized(
     "scala/collection/mutable/SetLike#retain()."
   )
 
   // == Rules ==
 
-  def replaceSymbols(ctx: RuleCtx): Patch = {
-    ctx.replaceSymbols(
+  def replaceSymbols(implicit ctx: SemanticContext): Patch = {
+    Patch.replaceSymbols(
       "scala.TraversableOnce"            -> "scala.IterableOnce",
       "scala.collection.TraversableOnce" -> "scala.collection.IterableOnce"
     )
   }
 
-  def replaceMutableSet(ctx: RuleCtx): Patch = {
+  def replaceMutableSet(implicit ctx: SemanticDocument): Patch = {
     ctx.tree.collect {
       case retainSet(n: Name) =>
-        ctx.replaceTree(n, "filterInPlace")
+        Patch.replaceTree(n, "filterInPlace")
     }.asPatch
   }
 
-  def replaceMutableMap(ctx: RuleCtx): Patch = {
+  private def trailingParens(tree: Tree,
+                             ctx: SemanticDocument): Option[(Token.LeftParen, Token.RightParen)] =
+    for {
+      end   <- tree.tokens.lastOption
+      open  <- ctx.tokenList.find(end)(_.is[Token.LeftParen]).map(_.asInstanceOf[Token.LeftParen])
+      close <- ctx.matchingParens.close(open)
+    } yield (open, close)
+
+  def replaceMutableMap(implicit ctx: SemanticDocument): Patch = {
     ctx.tree.collect {
       case Term.Apply(Term.Select(_, retainMap(n: Name)), List(_: Term.PartialFunction)) =>
-        ctx.replaceTree(n, "filterInPlace")
+        Patch.replaceTree(n, "filterInPlace")
 
       case Term.Apply(Term.Select(_, retainMap(n: Name)), List(_: Term.Function)) =>
-        trailingParens(n, ctx).map {
-          case (open, close) =>
-            ctx.replaceToken(open, "{case ") +
-              ctx.replaceToken(close, "}") +
-              ctx.replaceTree(n, "filterInPlace")
-        }.asPatch
+        this
+          .trailingParens(n, ctx)
+          .map {
+            case (open, close) =>
+              Patch.replaceToken(open, "{case ") +
+                Patch.replaceToken(close, "}") +
+                Patch.replaceTree(n, "filterInPlace")
+          }
+          .asPatch
     }.asPatch
   }
 
-  def replaceTupleZipped(ctx: RuleCtx): Patch = {
+  def replaceTupleZipped(implicit ctx: SemanticDocument): Patch = {
     ctx.tree.collect {
       case tupleZipped(Term.Select(Term.Tuple(args), name)) =>
         val removeTokensPatch =
@@ -85,14 +83,14 @@ case class Collection213UpgradeV0(index: SemanticdbIndex)
             openTuple  <- ctx.matchingParens.open(closeTuple.asInstanceOf[Token.RightParen])
             maybeDot = ctx.tokenList.slice(closeTuple, zipped).find(_.is[Token.Dot])
           } yield {
-            ctx.removeToken(openTuple) +
-              maybeDot.map(ctx.removeToken).asPatch +
-              ctx.removeToken(zipped)
+            Patch.removeToken(openTuple) +
+              maybeDot.map(Patch.removeToken).asPatch +
+              Patch.removeToken(zipped)
           }).asPatch
 
         def removeSurroundingWhiteSpaces(tk: Token) =
-          (ctx.tokenList.trailing(tk).takeWhile(_.is[Token.Space]).map(ctx.removeToken) ++
-            ctx.tokenList.leading(tk).takeWhile(_.is[Token.Space]).map(ctx.removeToken)).asPatch
+          (ctx.tokenList.trailing(tk).takeWhile(_.is[Token.Space]).map(Patch.removeToken) ++
+            ctx.tokenList.leading(tk).takeWhile(_.is[Token.Space]).map(Patch.removeToken)).asPatch
 
         val commas =
           for {
@@ -103,10 +101,10 @@ case class Collection213UpgradeV0(index: SemanticdbIndex)
 
         val replaceCommasPatch = commas match {
           case head :: tail =>
-            ctx.replaceToken(head, ".lazyZip(") +
+            Patch.replaceToken(head, ".lazyZip(") +
               removeSurroundingWhiteSpaces(head) ++
               tail.map { comma =>
-                ctx.replaceToken(comma, ").lazyZip(") +
+                Patch.replaceToken(comma, ").lazyZip(") +
                   removeSurroundingWhiteSpaces(comma)
               }
           case _ => Patch.empty
@@ -116,9 +114,8 @@ case class Collection213UpgradeV0(index: SemanticdbIndex)
     }.asPatch
   }
 
-  override def fix(ctx: RuleCtx): Patch = {
-    super.fix(ctx) +
-      replaceSymbols(ctx) +
+  override def fix(implicit ctx: SemanticDocument): Patch = {
+    replaceSymbols(ctx) +
       replaceTupleZipped(ctx) +
       replaceMutableMap(ctx) +
       replaceMutableSet(ctx)
